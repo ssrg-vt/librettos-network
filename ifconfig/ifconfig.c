@@ -94,6 +94,9 @@ __RCSID("$NetBSD: ifconfig.c,v 1.236 2016/01/07 11:32:21 roy Exp $");
 #include <unistd.h>
 #include <ifaddrs.h>
 #include <util.h>
+#include <pthread.h>
+#include <lwp.h>
+#include <semaphore.h>
 
 #include "extern.h"
 
@@ -101,6 +104,7 @@ __RCSID("$NetBSD: ifconfig.c,v 1.236 2016/01/07 11:32:21 roy Exp $");
 #include "parse.h"
 #include "env.h"
 #include "prog_ops.h"
+#include "ifconfig.h"
 
 #define WAIT_DAD	10000000 /* nanoseconds between each poll, 10ms */
 
@@ -108,7 +112,7 @@ static bool bflag, dflag, hflag, sflag, uflag, Wflag, wflag;
 bool lflag, Nflag, vflag, zflag;
 static long wflag_secs, Wflag_secs;
 
-static char gflags[10 + 26 * 2 + 1] = "AabCdhlNsuvW:w:z";
+static char gflags[10 + 26 * 2 + 1] = "ABabCdhlNsuvW:w:z";
 bool gflagset[10 + 26 * 2];
 
 static int carrier(prop_dictionary_t);
@@ -608,8 +612,10 @@ do_setifcaps(prop_dictionary_t env)
 		err(EXIT_FAILURE, "SIOCSIFCAP");
 }
 
-int
-main(int argc, char **argv)
+/* Specify handle_backend only if -B needs to be handled. In this case,
+   the return value will indicate if -B (backend) was not specified. */
+static bool
+ifconfigd_main(int argc, char **argv, bool handle_backend)
 {
 	const struct afswtch *afp;
 	int af, s, e;
@@ -637,6 +643,12 @@ main(int argc, char **argv)
 		switch (ch) {
 		case 'A':
 			warnx("-A is deprecated");
+			break;
+
+		case 'B':
+			if (!handle_backend)
+				errx(EXIT_FAILURE, "-B is specified incorrectly");
+			handle_backend = false;
 			break;
 
 		case 'a':
@@ -800,7 +812,169 @@ main(int argc, char **argv)
 	do_setifpreference(env);
 	do_setifcaps(env);
 
-	exit(EXIT_SUCCESS);
+	return handle_backend;
+}
+
+static int ifconfigd_direct_access; /* 1 for up, 0 for down */
+static int32_t ifconfigd_lid; /* lwp id */
+
+uint32_t ifconfigd_ipaddr = 0;
+uint32_t ifconfigd_netmask = 0xFFFFFF; /* 255.255.255.0 */
+uint32_t ifconfigd_mtu = 1500; /* default MTU 1500 */
+void (*ifconfigd_up) (void) = NULL;
+static uint32_t parsed_ipaddr;
+static uint32_t parsed_netmask;
+static uint32_t parsed_mtu;
+static char frontend_ipaddr[16];
+static char frontend_netmask[16];
+static char frontend_mtu[11];
+static char frontend_iface[21];
+uint32_t backend_ipaddr = 0; /* invalid address */
+uint32_t backend_mtu = 0; /* invalid address */
+
+static inline void ifconfigd_convert_addr(char *out, const uint32_t *in)
+{
+	const unsigned char *in8 = (const unsigned char *)in;
+	sprintf(out, "%u.%u.%u.%u", in8[0], in8[1], in8[2], in8[3]);
+}
+
+static void *ifconfigd_thread(void * ptr)
+{
+	char *argv[8];
+	int argc;
+
+	ifconfigd_lid = _lwp_self();
+	while(1)
+	{
+		/* list all interfaces */
+		printall(NULL, NULL);
+
+		/* go sleep */
+		if (_lwp_park(CLOCK_REALTIME, TIMER_ABSTIME, NULL, 0, "ifconfig", NULL) == -1)
+			printf("_lwp_park fails, errno: %d\n", errno);
+
+		if (ifconfigd_direct_access == 1)
+		{
+			/* Set physical interface */
+			argv[0] = "ifconfig";
+			argv[1] = frontend_iface;
+			argv[2] = frontend_ipaddr;
+			argv[3] = "netmask";
+			argv[4] = frontend_netmask;
+			argv[5] = "mtu";
+			argv[6] = frontend_mtu;
+			argv[7] = NULL;
+			argc = 7;
+			ifconfigd_main(argc, argv, false);
+
+			/* Set MAC address */
+			argv[0] = "ifconfig";
+			argv[1] = "xenif0";
+			argv[2] = "link";
+			argv[3] = "00:1b:21:73:ea:85";
+			argv[4] = "active";
+			argv[5] = NULL;
+			argc = 5;
+			ifconfigd_main(argc, argv, false);
+
+			ifconfigd_direct_access = 0;
+		}
+		else
+		{
+			/* Disable physical interface */
+			argv[0] = "ifconfig";
+			argv[1] = frontend_iface;
+			argv[2] = "down";
+			argv[3] = NULL;
+			argc = 3;
+			ifconfigd_main(argc, argv, false);
+
+			/* Set MAC address */
+			argv[0] = "ifconfig";
+			argv[1] = "xenif0";
+			argv[2] = "link";
+			argv[3] = "00:1b:21:73:ea:84";
+			argv[4] = "active";
+			argv[5] = NULL;
+			argc = 5;
+			ifconfigd_main(argc, argv, false);
+
+			ifconfigd_direct_access = 1;
+		}
+
+	}
+
+	return NULL;
+}
+
+
+int main(int argc, char **argv)
+{
+	/* Frontend */
+	if (argc == 3 && !strcmp(argv[1], "-F") && strlen(argv[2]) < sizeof(frontend_iface)) {
+		char *my_argv[8];
+		int my_argc;
+
+		/* Convert IP address and MTU to string */
+		ifconfigd_convert_addr(frontend_ipaddr, &ifconfigd_ipaddr);
+		ifconfigd_convert_addr(frontend_netmask, &ifconfigd_netmask);
+		sprintf(frontend_mtu, "%u", ifconfigd_mtu);
+		strcpy(frontend_iface, argv[2]);
+
+		/* Init IP address and MTU */
+		my_argv[0] = argv[0];
+		my_argv[1] = "xenif0";
+		my_argv[2] = frontend_ipaddr;
+		my_argv[3] = "netmask";
+		my_argv[4] = frontend_netmask;
+		my_argv[5] = "mtu";
+		my_argv[6] = frontend_mtu;
+		my_argv[7] = NULL;
+		my_argc = 7;
+		ifconfigd_main(my_argc, my_argv, false);
+
+		ifconfigd_direct_access = 1;
+		pthread_t ifconfigd_tid;
+		if (pthread_create(&ifconfigd_tid, NULL, ifconfigd_thread, NULL)) {
+			fprintf(stderr, "Cannot create ifconfigd thread\n");
+			return 1;
+		}
+	} else { /* Direct mode or backend */
+		sem_t sem;
+		sem_init(&sem, 0, 0);
+		bool is_direct = ifconfigd_main(argc, argv, true);
+		printall(NULL, NULL);
+		if (!is_direct) {
+			if (!parsed_ipaddr) {
+				fprintf(stderr, "Invalid IP!\n");
+				return 1;
+			}
+			ifconfigd_ipaddr = parsed_ipaddr;
+			if (parsed_netmask)
+				ifconfigd_netmask = parsed_netmask;
+			if (parsed_mtu)
+				ifconfigd_mtu = parsed_mtu;
+
+			/* Wakes up the backend to register IP address pool */
+			ifconfigd_up();
+
+			printf("Going to sleep...\n");
+			sem_wait(&sem);
+		}
+	}
+
+	return 0;
+}
+
+void ifconfigd_waker(int32_t lid)
+{
+	if (_lwp_unpark(lid, "ifconfig") == -1)
+		printf("_lwp_unpark fails, errno: %d\n", errno);
+}
+
+int32_t ifconfigd_get_lid(void)
+{
+	return ifconfigd_lid;
 }
 
 static void
@@ -980,6 +1154,12 @@ setifaddr(prop_dictionary_t env, prop_dictionary_t oenv)
 	assert(d != NULL);
 	pfx0 = prop_data_data_nocopy(d);
 
+	/* Store an IP address (assume a little endian host) */
+	if (pfx0->pfx_addr.sa_family == AF_INET) {
+		struct sockaddr_in *ip4 = (struct sockaddr_in *)&pfx0->pfx_addr;
+		parsed_ipaddr = ip4->sin_addr.s_addr;
+	}
+
 	if (pfx0->pfx_len >= 0) {
 		pfx = prefixlen_to_mask(af, pfx0->pfx_len);
 		if (pfx == NULL)
@@ -993,10 +1173,18 @@ setifaddr(prop_dictionary_t env, prop_dictionary_t oenv)
 static int
 setifnetmask(prop_dictionary_t env, prop_dictionary_t oenv)
 {
+	const struct paddr_prefix *pfx;
 	prop_data_t d;
 
 	d = (prop_data_t)prop_dictionary_get(env, "dstormask");
 	assert(d != NULL);
+	pfx = prop_data_data_nocopy(d);
+
+	/* Store a netmask (assume a little endian host) */
+	if (pfx->pfx_addr.sa_family == AF_INET) {
+		struct sockaddr_in *ip4 = (struct sockaddr_in *)&pfx->pfx_addr;
+		parsed_netmask = ip4->sin_addr.s_addr;
+	}
 
 	if (!prop_dictionary_set(oenv, "netmask", (prop_object_t)d))
 		return -1;
@@ -1190,6 +1378,9 @@ setifmtu(prop_dictionary_t env, prop_dictionary_t oenv)
 
 	rc = prop_dictionary_get_int64(env, "mtu", &mtu);
 	assert(rc);
+
+	/* Store an MTU */
+	parsed_mtu = (uint32_t)mtu;
 
 	ifr.ifr_mtu = mtu;
 	if (direct_ioctl(env, SIOCSIFMTU, &ifr) == -1)

@@ -183,7 +183,7 @@ createif_iso ()
 	[ "${iftag}" != "${ifbasename}" ] || usage
 
 	eval ${iftag}2ifname=${ifbasename}${nindex}
-	eval ${iftag}2cloner=false
+	eval ${iftag}2cloner=true
 
 	nindex=$(expr $nindex + 1)
 }
@@ -726,7 +726,6 @@ bake_iso ()
 			createif_iso ${netname},xenif
 			parse_newnetspec "${netname},${OPTARG}"
 			;;
-
 		b)
 			parse_blkspec "${OPTARG}" || usage
 			;;

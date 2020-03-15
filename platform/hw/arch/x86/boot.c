@@ -47,6 +47,7 @@
 
 #include <xen/memory.h>
 #include <xen/hvm/params.h>
+#include <xen/network.h>
 
 #define MP_MAGIC 0x5F504D5FU
 #define MT_MAGIC 0x504D4350U
@@ -287,6 +288,28 @@ static uint32_t xen_base = 0;
 shared_info_t *HYPERVISOR_shared_info;
 grant_entry_t *gnttab_table;
 
+uint32_t *HYPERVISOR_netdom_map;
+
+static void
+x86_xen_init_netmap(void)
+{
+	struct xen_add_to_physmap xatp;
+	unsigned long i;
+
+	HYPERVISOR_netdom_map = bmk_pgalloc(8);
+	if (!HYPERVISOR_netdom_map)
+		bmk_platform_halt("cannot allocate netdom map");
+	for (i = 0; i < 256; i++) {
+		xatp.domid = DOMID_SELF;
+		xatp.idx = i;
+		xatp.space = 6; //XENMAPSPACE_netdom;
+		xatp.gpfn = ((unsigned long) HYPERVISOR_netdom_map >>
+				PAGE_SHIFT) + i;
+		if (HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp))
+			bmk_platform_halt("cannot get netdom map");
+	}
+}
+
 static void
 x86_xen_init_shared(void)
 {
@@ -361,6 +384,9 @@ x86_xen_init(void)
 	x86_xen_init_callback(128);
 
 	bmk_printf("initialized XEN grant tables and event channels\n");
+
+	x86_xen_init_netmap();
+	bmk_printf("initialized XEN portmap table\n");
 }
 
 static volatile int main_cpu_ready = 0;

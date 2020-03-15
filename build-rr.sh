@@ -37,7 +37,7 @@ die ()
 helpme ()
 {
 
-	printf "Usage: $0 [-d destdir] [-j num] [-k] [-o objdir] [-q]\n"
+	printf "Usage: $0 [-d destdir] [-j num] [-b] [-f] [-k] [-o objdir] [-q]\n"
 	printf "\t[-s srcdir] hw|xen [build] [install] [-- buildrump.sh opts]\n"
 	printf "\n"
 	printf "\t-d: destination base directory, used by \"install\".\n"
@@ -47,6 +47,8 @@ helpme ()
 
 	printf "Expert-only options:\n"
 	printf "\t-o: use non-default object directory\n"
+	printf "\t-b: build the network backend domain\n"
+	printf "\t-b: build the network frontend domain\n"
 	printf "\t-k: build kernel only, without libc or tools\n"
 	printf "\t-s: specify alternative src-netbsd location\n\n"
 	printf "\tbuildrump.sh opts are passed to buildrump.sh\n"
@@ -95,6 +97,8 @@ parseargs ()
 {
 
 	RRDEST=
+	BACKEND=0
+	FRONTEND=0
 	KERNONLY=false
 	RROBJ=
 	RUMPSRC=src-netbsd
@@ -105,12 +109,18 @@ parseargs ()
 	DOinstall=false
 
 	orignargs=$#
-	while getopts '?d:hj:ko:qs:' opt; do
+	while getopts '?d:hj:ko:qs:bf' opt; do
 		case "$opt" in
 		'j')
 			[ -z "$(echo ${OPTARG} | tr -d '[0-9]')" ] \
 			    || die argument to -j must be a number
 			STDJ=-j${OPTARG}
+			;;
+		'b')
+			BACKEND=1
+			;;
+		'f')
+			FRONTEND=1
 			;;
 		'd')
 			RRDEST="${OPTARG}"
@@ -485,6 +495,18 @@ makeconfig ()
 
 	echo "RRDEST=${quote}${RRDEST}${quote}" >> ${1}
 	echo "RROBJ=${quote}${RROBJ}${quote}" >> ${1}
+
+	if [ ${BACKEND} -eq 1 ]
+	then
+		echo "BACKEND=1" > netdom.mk
+		echo "NETDOM_FLAG=" >> netdom.mk
+	elif [ ${FRONTEND} -eq 1 ]
+	then
+		echo "FRONTEND=1" > netdom.mk
+		echo "NETDOM_FLAG= -DNETDOM_FRONTEND" >> netdom.mk
+	else
+		echo "NETDOM_FLAG= -DNETDOM_DIRECT" > netdom.mk
+	fi
 
 	# wrap mandatory toolchain bits
 	for t in AR AS CC CPP LD NM OBJCOPY OBJDUMP RANLIB READELF \
