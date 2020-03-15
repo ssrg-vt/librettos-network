@@ -38,7 +38,7 @@ __RCSID("$NetBSD: pfsync.c,v 1.1 2009/09/14 10:36:49 degroote Exp $");
 #include <net/if.h>
 #include <net/route.h>
 #include <net/pfvar.h>
-#include <net/if_pfsync.h>
+#include "if_pfsync.h"
 
 #include <arpa/inet.h>
 
