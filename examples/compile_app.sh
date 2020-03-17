@@ -13,8 +13,6 @@ x86_64-rumprun-netbsd-cookfs -s 1 rootfs.fs rootfs
 rumprun-bake -m "add rootfs.fs" hw_generic app.bin ifconfig nginx
 #rumprun-bake -m "add rootfs.fs" hw_generic app.bin netpipe
 #rumprun-bake -m "add rootfs.fs" hw_generic app.bin redis-server
-#rumprun-bake -m "add rootfs.fs" hw_generic app.bin writer nginx
-#rumprun-bake -m "add rootfs.fs" hw_generic app.bin echoserver
-#rumprun-bake -m "add rootfs.fs" hw_generic app.bin iperf3
+#rumprun-bake -m "add rootfs.fs" hw_generic app.bin nfsd
 
 sudo ./create_app_iso.sh

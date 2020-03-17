@@ -13,8 +13,6 @@ x86_64-rumprun-netbsd-cookfs -s 1 rootfs.fs rootfs
 rumprun-bake -m "add rootfs.fs" hw_frontend frontend.bin ifconfig nginx
 #rumprun-bake -m "add rootfs.fs" hw_frontend frontend.bin netpipe
 #rumprun-bake -m "add rootfs.fs" hw_frontend frontend.bin redis-server
-#rumprun-bake -m "add rootfs.fs" hw_frontend frontend.bin writer nginx
-#rumprun-bake -m "add rootfs.fs" hw_frontend frontend.bin echoserver
-#rumprun-bake -m "add rootfs.fs" hw_frontend frontend.bin iperf3
+#rumprun-bake -m "add rootfs.fs" hw_frontend frontend.bin nfsd
 
 sudo ./create_frontend_iso.sh
