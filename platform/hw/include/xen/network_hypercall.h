@@ -4,11 +4,11 @@
 #include <mini-os/hypervisor.h>
 
 #ifndef __HYPERVISOR_rumprun_service_op
-# define __HYPERVISOR_rumprun_service_op	42
+# define __HYPERVISOR_rumprun_service_op	46
 #endif
 
 #ifndef __HYPERVISOR_rumprun_port_bind
-# define __HYPERVISOR_rumprun_port_bind		43
+# define __HYPERVISOR_rumprun_port_bind		47
 #endif
 
 #ifndef DOMID_BACKEND

@@ -36,7 +36,7 @@
 #include "../_service.h"
 
 #ifndef __HYPERVISOR_rumprun_service_op
-# define __HYPERVISOR_rumprun_service_op   42
+# define __HYPERVISOR_rumprun_service_op   46
 #endif
 
 struct arg
