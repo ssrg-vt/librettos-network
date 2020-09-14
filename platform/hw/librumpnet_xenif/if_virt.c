@@ -200,7 +200,7 @@ virtif_start(struct ifnet *ifp)
 			break;
 		}
 
-		bpf_mtap(ifp, m);
+		bpf_mtap(ifp, m, BPF_D_OUT);
 
 		if (VIFHYPER_SEND(sc->sc_viu, m) == 0)
 			m_freem(m);
@@ -249,7 +249,7 @@ rump_virtif_pktdeliver(struct virtif_sc *sc, const void *data, size_t len)
 #endif
 
 	KERNEL_LOCK_UNLESS_IFP_MPSAFE(ifp);
-	bpf_mtap(ifp, m);
+	bpf_mtap(ifp, m, BPF_D_IN);
 	ether_input(ifp, m);
 	KERNEL_UNLOCK_UNLESS_IFP_MPSAFE(ifp);
 }
@@ -309,7 +309,7 @@ void rump_virtif_pktdeliver_direct(struct ifnet *ifp, struct mbuf *m)
 	m->m_pkthdr.rcvif = ifp;
 #endif
 	KERNEL_LOCK_UNLESS_IFP_MPSAFE(ifp);
-	bpf_mtap(ifp, m);
+	bpf_mtap(ifp, m, BPF_D_IN);
 	ether_input(ifp, m);
 	KERNEL_UNLOCK_UNLESS_IFP_MPSAFE(ifp);
 }
