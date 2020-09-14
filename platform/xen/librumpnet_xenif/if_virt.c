@@ -198,7 +198,7 @@ virtif_start(struct ifnet *ifp)
 		}
 		if (i == LB_SH)
 			panic("lazy bum");
-		bpf_mtap(ifp, m0);
+		bpf_mtap(ifp, m0, BPF_D_OUT);
 
 		VIFHYPER_SEND(sc->sc_viu, io, i);
 
@@ -249,7 +249,7 @@ rump_virtif_pktdeliver(struct virtif_sc *sc, struct iovec *iov, size_t iovlen)
 #endif
 
 	KERNEL_LOCK(1, NULL);
-	bpf_mtap(ifp, m);
+	bpf_mtap(ifp, m, BPF_D_IN);
 	ether_input(ifp, m);
 	KERNEL_UNLOCK_LAST(NULL);
 }
