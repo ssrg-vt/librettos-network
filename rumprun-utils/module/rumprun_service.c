@@ -29,6 +29,7 @@
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
+#include <linux/fs.h>
 #include <asm/xen/hypercall.h>
 #include <xen/events.h>
 
@@ -141,7 +142,7 @@ static struct file_operations rumprun_service_ops = {
 };
 
 static struct miscdevice rumprun_service_device = {
-	.minor = 242,
+	.minor = 249,
 	.name = "rumprun_service",
 	.fops = &rumprun_service_ops
 };
