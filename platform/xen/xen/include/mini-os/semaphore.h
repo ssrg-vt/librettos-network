@@ -6,6 +6,7 @@
 struct semaphore {
 	struct bmk_block_queue block;
 	long count;
+	__attribute__ ((aligned(BMK_PCPU_L1_SIZE))) char _pad[0];
 };
 
 /*
@@ -19,8 +20,7 @@ struct rw_semaphore {
 static inline void init_SEMAPHORE(struct semaphore *sem, long count)
 {
 	sem->count = count;
-	sem->block.header.callback = bmk_block_queue_callback;
-	sem->block.queue = bmk_block_queue_alloc();
+	bmk_block_queue_init(&sem->block);
 }
 
 #define init_MUTEX(sem) init_SEMAPHORE(sem, 1)
@@ -49,7 +49,7 @@ static inline void down(struct semaphore *sem)
 static inline void up(struct semaphore *sem)
 {
 	if (__atomic_fetch_add(&sem->count, 1, __ATOMIC_SEQ_CST) < 0)
-		bmk_block_queue_wake(sem->block.queue);
+		bmk_block_queue_wake(&sem->block);
 }
 
 /* FIXME! Thre read/write semaphores are unimplemented! */

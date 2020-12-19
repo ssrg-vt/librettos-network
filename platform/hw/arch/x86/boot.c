@@ -408,10 +408,11 @@ x86_boot(struct multiboot_info *mbi, unsigned long cpu)
 
 	multiboot(mbi);
 
-	x86_xen_init();
 	x86_mp_init();
 
 	bmk_sched_init();
+	x86_xen_init();
+
 	intr_init();
 
 	spl0();
