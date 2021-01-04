@@ -27,6 +27,7 @@
 #define _BMK_CORE_SCHED_H_
 
 #include <bmk-core/types.h>
+#include <bmk-pcpu/pcpu.h>
 
 #define BMK_TLS_EXTRA (6 * sizeof(unsigned long))
 struct bmk_tcb {
@@ -38,8 +39,11 @@ struct bmk_tcb {
 #endif
 };
 
-#define BMK_MAX_THREADS_ORDER	13
+#define BMK_MAX_THREADS_ORDER	15
 #define BMK_MAX_THREADS		(1UL << BMK_MAX_THREADS_ORDER)
+
+#define BMK_MAX_BLOCKQ_ORDER	17 /* >= BMK_MAX_THREADS_ORDER */
+#define BMK_MAX_BLOCKQ		(1UL << BMK_MAX_BLOCKQ_ORDER)
 
 struct bmk_thread;
 
@@ -102,16 +106,14 @@ void	bmk_cpu_sched_switch(void *, struct bmk_block_data *, void *);
 
 void	bmk_platform_cpu_sched_settls(struct bmk_tcb *);
 
-struct lfqueue;
-
 struct bmk_block_queue {
+	/* cannot use struct lfqueue here */
+	__attribute__ ((aligned(BMK_PCPU_L1_SIZE))) char _queue[2*BMK_PCPU_L1_SIZE];
 	struct bmk_block_data header;
-	struct lfring *queue;
 };
 
-void	bmk_block_queue_callback(struct bmk_thread *, struct bmk_block_data *);
-struct lfring	*bmk_block_queue_alloc(void);
-void	bmk_block_queue_wake(struct lfring *);
-void	bmk_block_queue_wake_single(struct lfring *);
+void	bmk_block_queue_init(struct bmk_block_queue *);
+void	bmk_block_queue_destroy(struct bmk_block_queue *);
+void	bmk_block_queue_wake(struct bmk_block_queue *);
 
 #endif /* _BMK_CORE_SCHED_H_ */

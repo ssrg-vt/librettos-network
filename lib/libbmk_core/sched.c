@@ -47,6 +47,7 @@
 
 #include <bmk-core/types.h>
 #include <bmk-core/lfring.h>
+#include <bmk-core/lfqueue.h>
 
 void *bmk_mainstackbase;
 unsigned long bmk_mainstacksize;
@@ -57,12 +58,12 @@ unsigned long bmk_mainstacksize;
  */
 #define BLOCKTIME_MAX (1*1000*1000*1000)
 
-#define NAME_MAXLEN 16
+#define NAME_MAXLEN 26
 #define MAXCPUS 64
 
 /* flags and their meanings + invariants */
-#define THR_MUSTJOIN	0x0001
-#define THR_EXTSTACK	0x0002
+#define THR_MUSTJOIN	0x01
+#define THR_EXTSTACK	0x02
 
 #if !(defined(__i386__) || defined(__x86_64__))
 #define _TLS_I
@@ -87,19 +88,28 @@ extern const char _tbss_start[], _tbss_end[];
 	(type *) ((char *) (addr) - offsetof(type, field))
 
 struct bmk_join_data {
-	struct bmk_block_data header;
 	_Atomic(unsigned long) value;
+};
+
+struct bmk_join_block {
+	struct bmk_block_data header;
+	struct bmk_join_data *data;
 };
 
 struct bmk_thread {
 	/* MD thread control block */
 	struct bmk_tcb bt_tcb;
 
+	struct lfqueue_node *bt_block_node;
+
 	unsigned int bt_idx;
-	int bt_flags;
 	unsigned int bt_cpuidx;
 
 	char bt_name[NAME_MAXLEN];
+	unsigned char bt_timedout;
+	unsigned char bt_flags;
+
+	int bt_errno;
 
 	void *bt_stackbase;
 	void *bt_cookie;
@@ -107,16 +117,15 @@ struct bmk_thread {
 	bmk_time_t bt_wakeup_time;
 	void (*bt_wake) (struct bmk_thread *);
 
-	int bt_errno;
-	int bt_timedout;
-
 	struct bmk_join_data bt_join;
 	struct bmk_join_data bt_exit;
 
 	TAILQ_ENTRY(bmk_thread) bt_schedq;
 	__attribute__ ((aligned(BMK_PCPU_L1_SIZE))) char _pad[0];
-} __attribute__ ((aligned(BMK_PCPU_L1_SIZE)));
+};
 __thread struct bmk_thread *bmk_current;
+
+static struct lfqueue_node *nodes_array;
 static struct bmk_thread *thread_array;
 
 TAILQ_HEAD(threadqueue, bmk_thread);
@@ -137,23 +146,23 @@ TAILQ_HEAD(threadqueue, bmk_thread);
  */
 
 static struct lfring * runq[MAXCPUS+1], * freeq, * zombieq;
+static struct lfring * nodes;
 static struct threadqueue timeq[MAXCPUS+1];
 
 static void (*scheduler_hook)(void *, void *);
 
 static void
-join_callback(struct bmk_thread *prev, struct bmk_block_data *_join)
+join_callback(struct bmk_thread *prev, struct bmk_block_data *_block)
 {
-	struct bmk_join_data *join = (struct bmk_join_data *) _join;
+	struct bmk_join_block *block = (struct bmk_join_block *) _block;
 
-	if (atomic_exchange(&join->value, (unsigned long) prev) == 1)
+	if (atomic_exchange(&block->data->value, (unsigned long) prev) == 1)
 		bmk_sched_wake(prev);
 }
 
 static inline void
 join_init(struct bmk_join_data *join)
 {
-	join->header.callback = join_callback;
 	atomic_init(&join->value, 1);
 }
 
@@ -161,8 +170,12 @@ static inline void
 join_wait(struct bmk_join_data *join)
 {
 	if (atomic_fetch_sub(&join->value, 1) == 1) {
+		struct bmk_join_block block;
+		block.header.callback = join_callback;
+		block.data = join;
+
 		bmk_sched_blockprepare();
-		bmk_sched_block(&join->header);
+		bmk_sched_block(&block.header);
 	}
 }
 
@@ -294,7 +307,7 @@ schedule(struct bmk_block_data *data)
 	for (;;) {
 		bmk_time_t curtime, waketime;
 
-		if ((idx = lfring_dequeue_single(runq[cpuidx],
+		if ((idx = lfring_dequeue(runq[cpuidx],
 				BMK_MAX_THREADS_ORDER, false))
 				!= LFRING_EMPTY) {
 			next = &thread_array[idx];
@@ -389,7 +402,7 @@ schedule(struct bmk_block_data *data)
 
 		if ((thread->bt_flags & THR_EXTSTACK) == 0)
 			stackfree(thread);
-		lfring_enqueue(freeq, BMK_MAX_THREADS_ORDER, idx);
+		lfring_enqueue(freeq, BMK_MAX_THREADS_ORDER, idx, false);
 	}
 }
 
@@ -453,6 +466,17 @@ initcurrent(void *tcb, struct bmk_thread *value)
 	*dst = value;
 }
 
+static struct lfqueue_node *
+do_block_node_alloc(void)
+{
+	size_t idx;
+
+	if ((idx = lfring_dequeue(nodes, BMK_MAX_BLOCKQ_ORDER, false))
+			== LFRING_EMPTY)
+		bmk_platform_halt("ran out of block queue nodes");
+	return &nodes_array[idx];
+}
+
 static struct bmk_thread *
 do_sched_create_withtls(const char *name, void *cookie, int joinable,
 	int cpuidx, void (*f)(void *), void *data,
@@ -495,9 +519,12 @@ do_sched_create_withtls(const char *name, void *cookie, int joinable,
 	inittcb(&thread->bt_tcb, tlsarea, TCBOFFSET);
 	initcurrent(tlsarea, thread);
 
+	thread->bt_block_node = do_block_node_alloc();
+	thread->bt_block_node->object = thread;
+
 	if (insert)
 		lfring_enqueue(runq[thread->bt_cpuidx], BMK_MAX_THREADS_ORDER,
-				idx);
+				idx, false);
 
 	return thread;
 }
@@ -533,7 +560,7 @@ static void
 exit_callback(struct bmk_thread *prev, struct bmk_block_data *data)
 {
 	/* Put onto exited list */
-	lfring_enqueue(zombieq, BMK_MAX_THREADS_ORDER, prev->bt_idx);
+	lfring_enqueue(zombieq, BMK_MAX_THREADS_ORDER, prev->bt_idx, false);
 }
 
 static struct bmk_block_data exit_data = { .callback = exit_callback };
@@ -613,7 +640,7 @@ void
 bmk_sched_wake(struct bmk_thread *thread)
 {
 	lfring_enqueue(runq[thread->bt_cpuidx], BMK_MAX_THREADS_ORDER,
-			thread->bt_idx);
+			thread->bt_idx, false);
 }
 
 void
@@ -646,7 +673,7 @@ bmk_sched_init(void)
 {
 	unsigned long tlsinit;
 	struct bmk_tcb tcbinit;
-	size_t i, thread_order;
+	size_t i;
 	struct lfring *local_runq;
 	unsigned long ncpus = bmk_numcpus;
 
@@ -659,20 +686,23 @@ bmk_sched_init(void)
 		runq[i] = NULL;
 	}
 
-	thread_order = (8 * sizeof(long) - 1)
-			- __builtin_clzl(sizeof(struct bmk_thread));
-	thread_array = bmk_pgalloc(BMK_MAX_THREADS_ORDER + thread_order
-				- BMK_PCPU_PAGE_SHIFT);
+	nodes_array = bmk_memalloc(sizeof(struct lfqueue_node) * BMK_MAX_BLOCKQ,
+				BMK_PCPU_L1_SIZE, BMK_MEMWHO_WIREDBMK);
+	if (!nodes_array)
+		bmk_platform_halt("cannot allocate nodes_array");
+	for (i = 0; i != BMK_MAX_BLOCKQ; i++)
+		nodes_array[i].index = i;
+
+	thread_array = bmk_memalloc(sizeof(struct bmk_thread) * BMK_MAX_THREADS,
+				BMK_PCPU_L1_SIZE, BMK_MEMWHO_WIREDBMK);
+	if (!thread_array)
+		bmk_platform_halt("cannot allocate thread_array");
 
 	freeq = bmk_memalloc(LFRING_SIZE(BMK_MAX_THREADS_ORDER),
 			LFRING_ALIGN, BMK_MEMWHO_WIREDBMK);
 	if (!freeq)
 		bmk_platform_halt("cannot allocate freeq");
-
-	/* The thread index 0 is reserved for marked queues, so
-	   skip it and avoid ever using it. */
-	lfring_init_fill(freeq, 1,
-		BMK_MAX_THREADS, BMK_MAX_THREADS_ORDER);
+	lfring_init_full(freeq, BMK_MAX_THREADS_ORDER);
 
 	for (i = 0; i < ncpus; i++) {
 		local_runq = bmk_memalloc(LFRING_SIZE(BMK_MAX_THREADS_ORDER),
@@ -696,6 +726,12 @@ bmk_sched_init(void)
 	if (!zombieq)
 		bmk_platform_halt("cannot allocate zombieq");
 	lfring_init_empty(zombieq, BMK_MAX_THREADS_ORDER);
+
+	nodes = bmk_memalloc(LFRING_SIZE(BMK_MAX_BLOCKQ_ORDER),
+			LFRING_ALIGN, BMK_MEMWHO_WIREDBMK);
+	if (!nodes)
+		bmk_platform_halt("cannot allocate nodes");
+	lfring_init_full(nodes, BMK_MAX_BLOCKQ_ORDER);
 
 	inittcb(&tcbinit, &tlsinit, 0);
 	bmk_platform_cpu_sched_settls(&tcbinit);
@@ -788,7 +824,7 @@ yield_callback(struct bmk_thread *prev, struct bmk_block_data *data)
 {
 	/* make schedulable and re-insert into the run queue */
 	lfring_enqueue(runq[prev->bt_cpuidx], BMK_MAX_THREADS_ORDER,
-			prev->bt_idx);
+			prev->bt_idx, false);
 }
 
 static struct bmk_block_data yield_data = { .callback = yield_callback };
@@ -799,44 +835,44 @@ bmk_sched_yield(void)
 	schedule(&yield_data);
 }
 
-void
-bmk_block_queue_callback(struct bmk_thread *prev, struct bmk_block_data *_block)
+static void
+block_queue_callback(struct bmk_thread *prev, struct bmk_block_data *_block)
 {
-	struct bmk_block_queue *block = (struct bmk_block_queue *) _block;
+	struct bmk_block_queue *block = bmk_container_of(_block, struct bmk_block_queue, header);
+	struct lfqueue *queue = (struct lfqueue *) block->_queue;
 
-	if (!lfring_enqueue(block->queue, BMK_MAX_THREADS_ORDER, prev->bt_idx))
+	if (!lfqueue_enqueue(queue, prev->bt_block_node, true))
 		bmk_sched_wake(prev);
 }
 
-struct lfring *
-bmk_block_queue_alloc(void)
+void
+bmk_block_queue_init(struct bmk_block_queue *block)
 {
-	struct lfring *queue = bmk_memalloc(LFRING_SIZE(BMK_MAX_THREADS_ORDER),
-		LFRING_ALIGN, BMK_MEMWHO_WIREDBMK);
-	if (!queue)
-		bmk_platform_halt("cannot allocate a marked queue");
-	lfring_init_mark(queue, BMK_MAX_THREADS_ORDER);
-	return queue;
+	struct lfqueue *queue = (struct lfqueue *) block->_queue;
+
+	block->header.callback = block_queue_callback;
+	lfqueue_init(queue, do_block_node_alloc());
 }
 
 void
-bmk_block_queue_wake(struct lfring *queue)
+bmk_block_queue_destroy(struct bmk_block_queue *block)
 {
-	size_t idx = lfring_dequeue_mark(queue, BMK_MAX_THREADS_ORDER);
-	if (idx != 0) {
-		struct bmk_thread *thread = &thread_array[idx];
-		lfring_enqueue(runq[thread->bt_cpuidx], BMK_MAX_THREADS_ORDER,
-				idx);
-	}
+	struct lfqueue *queue = (struct lfqueue *) block->_queue;
+	struct lfqueue_node *node = lfqueue_sentinel(queue);
+
+	lfring_enqueue(nodes, BMK_MAX_BLOCKQ_ORDER, node->index, false);
 }
 
 void
-bmk_block_queue_wake_single(struct lfring *queue)
+bmk_block_queue_wake(struct bmk_block_queue *block)
 {
-	size_t idx = lfring_dequeue_mark_single(queue, BMK_MAX_THREADS_ORDER);
-	if (idx != 0) {
-		struct bmk_thread *thread = &thread_array[idx];
+	struct lfqueue *queue = (struct lfqueue *) block->_queue;
+	struct lfqueue_node *node = lfqueue_dequeue(queue, true);
+
+	if (node != NULL) {
+		struct bmk_thread *thread = node->object;
+		thread->bt_block_node = node;
 		lfring_enqueue(runq[thread->bt_cpuidx], BMK_MAX_THREADS_ORDER,
-				idx);
+				thread->bt_idx, false);
 	}
 }

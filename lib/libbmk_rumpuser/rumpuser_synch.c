@@ -75,9 +75,9 @@ rumpuser_thread_join(void *p)
 
 struct rumpuser_mtx {
 	struct bmk_block_queue block;
+	_Atomic(unsigned long) counter;
 	struct lwp *owner;
 	int flags;
-	_Alignas(BMK_PCPU_L1_SIZE) _Atomic(unsigned long) counter;
 	_Alignas(BMK_PCPU_L1_SIZE) char _pad[0];
 };
 
@@ -86,9 +86,11 @@ rumpuser_mutex_init(struct rumpuser_mtx **mtxp, int flags)
 {
 	struct rumpuser_mtx *mtx;
 
-	mtx = bmk_memcalloc(1, sizeof(*mtx), BMK_MEMWHO_WIREDBMK);
-	mtx->block.header.callback = bmk_block_queue_callback;
-	mtx->block.queue = bmk_block_queue_alloc();
+	mtx = bmk_memalloc(sizeof(*mtx), BMK_PCPU_L1_SIZE, BMK_MEMWHO_WIREDBMK);
+	if (!mtx)
+		bmk_platform_halt("cannot allocate a mutex");
+	bmk_block_queue_init(&mtx->block);
+	atomic_init(&mtx->counter, 0);
 	mtx->owner = NULL;
 	mtx->flags = flags;
 	*mtxp = mtx;
@@ -175,14 +177,14 @@ rumpuser_mutex_exit(struct rumpuser_mtx *mtx)
 {
 	mtx->owner = NULL;
 	if (atomic_fetch_sub(&mtx->counter, 1) != 1)
-		bmk_block_queue_wake_single(mtx->block.queue);
+		bmk_block_queue_wake(&mtx->block);
 }
 
 void
 rumpuser_mutex_destroy(struct rumpuser_mtx *mtx)
 {
 	bmk_assert(mtx->owner == NULL);
-	bmk_memfree(mtx->block.queue, BMK_MEMWHO_WIREDBMK);
+	bmk_block_queue_destroy(&mtx->block);
 	bmk_memfree(mtx, BMK_MEMWHO_WIREDBMK);
 }
 
@@ -199,6 +201,7 @@ struct rumpuser_rw {
 	struct rumpuser_mtx *wait_mtx;
 	_Atomic(unsigned long) readers;
 	_Atomic(unsigned long) type;
+	_Alignas(BMK_PCPU_L1_SIZE) char _pad[0];
 };
 
 void
@@ -206,7 +209,9 @@ rumpuser_rw_init(struct rumpuser_rw **rwp)
 {
 	struct rumpuser_rw *rw;
 
-	rw = bmk_memcalloc(1, sizeof(*rw), BMK_MEMWHO_WIREDBMK);
+	rw = bmk_memalloc(sizeof(*rw), BMK_PCPU_L1_SIZE, BMK_MEMWHO_WIREDBMK);
+	if (!rw)
+		bmk_platform_halt("cannot allocate a RW lock");
 	atomic_init(&rw->readers, 0);
 	atomic_init(&rw->type, LOCK_RW_UNKNOWN);
 	rumpuser_mutex_init(&rw->access_mtx, RUMPUSER_MTX_KMUTEX);
@@ -375,7 +380,9 @@ rumpuser_cv_init(struct rumpuser_cv **cvp)
 {
 	struct rumpuser_cv *cv;
 
-	cv = bmk_memcalloc(1, sizeof(*cv), BMK_MEMWHO_WIREDBMK);
+	cv = bmk_memalloc(sizeof(*cv), 0, BMK_MEMWHO_WIREDBMK);
+	if (!cv)
+		bmk_platform_halt("cannot allocate a CV");
 	TAILQ_INIT(&cv->waiters);
 #ifdef RUMPUSER_SYNCH_DEBUG
 	cv->cv_mtx = NULL;
