@@ -52,9 +52,9 @@ static backend_connect_t network_dom_info;
 static frontend_connect_t app_dom_info;
 
 #define NETDOM_ARING(fring)	\
-	((struct netdom_aring *) ((char *) fring + 2 * PAGE_SIZE))
+	((struct netdom_aring *) ((char *) fring + 3 * PAGE_SIZE))
 #define NETDOM_BUF(fring)	\
-	((char *) fring + 4 * PAGE_SIZE)
+	((char *) fring + 6 * PAGE_SIZE)
 
 static struct netdom_fring *tx_fring = NULL;
 static struct netdom_fring *rx_fring;
@@ -114,9 +114,11 @@ static void frontend_terminate_ring(frontend_grefs_t **pgrefs, uint32_t *result)
 	grefs = *pgrefs;
 	gnttab_end_access(grefs->aring_grefs[0]);
 	gnttab_end_access(grefs->aring_grefs[1]);
+	gnttab_end_access(grefs->aring_grefs[2]);
 
 	gnttab_end_access(grefs->fring_grefs[0]);
 	gnttab_end_access(grefs->fring_grefs[1]);
+	gnttab_end_access(grefs->fring_grefs[2]);
 
 	for (i = 0; i < NETDOM_RING_DATA_PAGES; i++)
 		gnttab_end_access(grefs->buf_grefs[i]);
@@ -140,7 +142,7 @@ static struct netdom_fring * frontend_init_ring(frontend_grefs_t **pgrefs,
 	result[1] = gnttab_grant_access(network_dom_info.domid,
 			frontend_virt_to_pfn((char *) grefs + PAGE_SIZE), 0);
 
-	fring = bmk_pgalloc(gntmap_map2order(4 + NETDOM_RING_DATA_PAGES));
+	fring = bmk_pgalloc(gntmap_map2order(6 + NETDOM_RING_DATA_PAGES));
 	if (!fring)
 		bmk_platform_halt("shared pages are not allocated\n");
 	aring = NETDOM_ARING(fring);
@@ -148,10 +150,14 @@ static struct netdom_fring * frontend_init_ring(frontend_grefs_t **pgrefs,
 			frontend_virt_to_pfn(aring), 0);
 	grefs->aring_grefs[1] = gnttab_grant_access(network_dom_info.domid,
 			frontend_virt_to_pfn((char *) aring + PAGE_SIZE), 0);
+	grefs->aring_grefs[2] = gnttab_grant_access(network_dom_info.domid,
+			frontend_virt_to_pfn((char *) aring + 2 * PAGE_SIZE), 0);
 	grefs->fring_grefs[0] = gnttab_grant_access(network_dom_info.domid,
 			frontend_virt_to_pfn(fring), 0);
 	grefs->fring_grefs[1] = gnttab_grant_access(network_dom_info.domid,
 			frontend_virt_to_pfn((char *) fring + PAGE_SIZE), 0);
+	grefs->fring_grefs[2] = gnttab_grant_access(network_dom_info.domid,
+			frontend_virt_to_pfn((char *) fring + 2 * PAGE_SIZE), 0);
 	buf = NETDOM_BUF(fring);
 	lfring_init_empty((struct lfring *) aring->ring, NETDOM_RING_ORDER);
 	lfring_init_full((struct lfring *) fring->ring, NETDOM_RING_ORDER);
@@ -194,7 +200,7 @@ static void frontend_receiver(void *arg)
 start_over:
 	fails = 0;
 again:
-	while ((idx = lfring_dequeue_single((struct lfring *) NETDOM_ARING(rx_fring)->ring,
+	while ((idx = lfring_dequeue((struct lfring *) NETDOM_ARING(rx_fring)->ring,
 			NETDOM_RING_ORDER, false)) != LFRING_EMPTY) {
 retry:
 		fails = 0;
@@ -204,7 +210,7 @@ retry:
 		rump_virtif_pktdeliver(frontend_vif_sc, slot + 1, len);
 		rumpuser__hyp.hyp_unschedule();
 		lfring_enqueue((struct lfring *) rx_fring->ring,
-				NETDOM_RING_ORDER, idx);
+				NETDOM_RING_ORDER, idx, false);
 	}
 	if (++fails < 256) {
 		bmk_sched_yield();
@@ -213,7 +219,7 @@ retry:
 
 	/* Shut down the thread */
 	atomic_store(&NETDOM_ARING(rx_fring)->readers, -1);
-	idx = lfring_dequeue_single((struct lfring *) NETDOM_ARING(rx_fring)->ring,
+	idx = lfring_dequeue((struct lfring *) NETDOM_ARING(rx_fring)->ring,
 			NETDOM_RING_ORDER, false);
 	if (idx != LFRING_EMPTY)
 		goto retry;
@@ -250,7 +256,7 @@ void frontend_send(struct mbuf *m0)
 	}
 
 	lfring_enqueue((struct lfring *) NETDOM_ARING(tx_fring)->ring,
-			NETDOM_RING_ORDER, idx);
+			NETDOM_RING_ORDER, idx, false);
 
 	/* Wake up the other side. */
 	if (atomic_load(&NETDOM_ARING(tx_fring)->readers) <= 0)

@@ -11,8 +11,8 @@ typedef uint32_t grant_ref_t;
 
 typedef struct frontend_grefs {
 	grant_ref_t next_grefs[2];
-	grant_ref_t aring_grefs[2];
-	grant_ref_t fring_grefs[2];
+	grant_ref_t aring_grefs[3];
+	grant_ref_t fring_grefs[3];
 	grant_ref_t buf_grefs[0];
 } frontend_grefs_t;
 

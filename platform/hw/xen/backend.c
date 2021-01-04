@@ -309,7 +309,7 @@ static void backend_forward_receiver(void *arg)
 start_over:
 	fails = 0;
 again:
-	while ((idx = lfring_dequeue_single((struct lfring *) rx_aring[dom]->ring,
+	while ((idx = lfring_dequeue((struct lfring *) rx_aring[dom]->ring,
 			NETDOM_RING_ORDER, false)) != LFRING_EMPTY) {
 retry:
 		fails = 0;
@@ -320,7 +320,7 @@ retry:
 		rump_virtif_pktforward(backend_ifp, slot + 1, len);
 		rumpuser__hyp.hyp_unschedule();
 		lfring_enqueue((struct lfring *) rx_fring[dom]->ring,
-				NETDOM_RING_ORDER, idx);
+				NETDOM_RING_ORDER, idx, false);
 	}
 	if (++fails < 256) {
 		bmk_sched_yield();
@@ -328,7 +328,7 @@ retry:
 	}
 	/* Shut down the thread */
 	atomic_store(&rx_aring[dom]->readers, -1);
-	idx = lfring_dequeue_single((struct lfring *) rx_aring[dom]->ring,
+	idx = lfring_dequeue((struct lfring *) rx_aring[dom]->ring,
 			NETDOM_RING_ORDER, false);
 	if (idx != LFRING_EMPTY)
 		goto retry;
@@ -365,7 +365,7 @@ static void backend_forward_send(unsigned int dom, struct mbuf *m0)
 	}
 
 	lfring_enqueue((struct lfring *) tx_aring[dom]->ring,
-			NETDOM_RING_ORDER, idx);
+			NETDOM_RING_ORDER, idx, false);
 	/* Wake up the other side. */
 	if (atomic_load(&tx_aring[dom]->readers) <= 0)
 		minios_notify_remote_via_evtchn(network_dom_info.port[dom]);
@@ -423,9 +423,9 @@ void backend_connect(evtchn_port_t port)
 	tx_grefs = gntmap_map_grant_refs(&backend_map[dom],
 			2, domids, 0, app_dom_info[dom].grefs, 1);
 	tx_aring[dom] = gntmap_map_grant_refs(&backend_map[dom],
-			2, domids, 0, tx_grefs->aring_grefs, 1);
+			3, domids, 0, tx_grefs->aring_grefs, 1);
 	fring = gntmap_map_grant_refs(&backend_map[dom],
-			2, domids, 0, tx_grefs->fring_grefs, 1);
+			3, domids, 0, tx_grefs->fring_grefs, 1);
 	tx_buf[dom] = gntmap_map_grant_refs(&backend_map[dom],
 		NETDOM_RING_DATA_PAGES, domids, 0, tx_grefs->buf_grefs, 1);
 
@@ -433,9 +433,9 @@ void backend_connect(evtchn_port_t port)
 	rx_grefs = gntmap_map_grant_refs(&backend_map[dom],
 			2, domids, 0, tx_grefs->next_grefs, 1);
 	rx_aring[dom] = gntmap_map_grant_refs(&backend_map[dom],
-			2, domids, 0, rx_grefs->aring_grefs, 1);
+			3, domids, 0, rx_grefs->aring_grefs, 1);
 	rx_fring[dom] = gntmap_map_grant_refs(&backend_map[dom],
-			2, domids, 0, rx_grefs->fring_grefs, 1);
+			3, domids, 0, rx_grefs->fring_grefs, 1);
 	rx_buf[dom] = gntmap_map_grant_refs(&backend_map[dom],
 		NETDOM_RING_DATA_PAGES, domids, 0, rx_grefs->buf_grefs, 1);
 
